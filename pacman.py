@@ -1,7 +1,7 @@
-"""PAC-MAN DELUXE | Arduino + joystick + ranking local.
+"""PAC-MAN DELUXE v3 | Arduino + joystick ajustavel + ranking local.
 
-Python 3.14: use pygame-ce (which is imported as pygame) and pyserial.
-The firmware and wiring from the original Arduino project remain unchanged.
+Python 3.14: pygame-ce (import pygame) e pyserial.
+Firmware anterior continua compativel; recomendado o novo sketch de 50 Hz.
 """
 from __future__ import annotations
 
@@ -45,7 +45,13 @@ POWER_SECONDS = 8.0
 # Ajuste a orientação se o joystick estiver invertido.
 INVERTER_X = False
 INVERTER_Y = False
-LIMIAR_JOYSTICK = 175
+# Configuracao inicial do controle. F7 = mais sensivel; F8 = menos sensivel.
+JOY_ENTER = 190      # exigencia inicial para ativar um eixo (0..512)
+JOY_MIN_ENTER = 110
+JOY_MAX_ENTER = 310
+JOY_SWITCH_RATIO = 1.22  # reduz oscilacao quando o joystick fica na diagonal
+JOY_TURN_BUFFER = 0.68   # tempo para realizar uma curva indicada pouco antes
+
 
 BG = (7, 11, 26)
 BOARD = (9, 15, 36)
@@ -133,6 +139,62 @@ class Ranking:
         return entry["id"] if entry in self.entries else None
 
 
+class JoystickFilter:
+    """Interpreta analogico 2D com zona morta, histerese e eixo dominante.
+
+    O valor de retorno None significa centro/neutralidade, e nao para o Pac-Man.
+    Pode ser calibrado sem modificar a montagem: pressione C com joystick solto.
+    """
+
+    def __init__(self, threshold: int = JOY_ENTER):
+        self.threshold = max(JOY_MIN_ENTER, min(JOY_MAX_ENTER, threshold))
+        self.center_x = 512
+        self.center_y = 512
+        self.last_raw: tuple[int, int] | None = None
+        self.active: str | None = None
+
+    @property
+    def release(self) -> int:
+        return max(60, round(self.threshold * 0.58))
+
+    def change_sensitivity(self, amount: int):
+        self.threshold = max(JOY_MIN_ENTER, min(JOY_MAX_ENTER, self.threshold + amount))
+        self.active = None
+
+    def calibrate(self) -> bool:
+        if self.last_raw is None:
+            return False
+        self.center_x, self.center_y = self.last_raw
+        self.active = None
+        return True
+
+    def read(self, x: int, y: int) -> str | None:
+        self.last_raw = (x, y)
+        dx = (x - self.center_x) * (-1 if INVERTER_X else 1)
+        dy = (y - self.center_y) * (-1 if INVERTER_Y else 1)
+        sx, sy = abs(dx), abs(dy)
+        if max(sx, sy) < self.release:
+            self.active = None
+            return None
+
+        dominant = 'x' if sx >= sy else 'y'
+        if self.active is not None:
+            axis = 'x' if self.active in ('L', 'R') else 'y'
+            this_strength = sx if axis == 'x' else sy
+            other_strength = sy if axis == 'x' else sx
+            this_sign = ('R' if dx >= 0 else 'L') if axis == 'x' else ('D' if dy >= 0 else 'U')
+            # Manter a direcao durante pequenas variacoes na diagonal.
+            if this_strength >= self.release and this_sign == self.active:
+                if other_strength < max(self.threshold, this_strength * JOY_SWITCH_RATIO):
+                    return self.active
+            # Troca intencional: requer ativacao real do outro eixo ou do oposto.
+        if (sx if dominant == 'x' else sy) < self.threshold:
+            self.active = None
+            return None
+        self.active = ('R' if dx >= 0 else 'L') if dominant == 'x' else ('D' if dy >= 0 else 'U')
+        return self.active
+
+
 class ArduinoLink:
     """Serial não bloqueante. Arduino -> J,x,y,botao ; Python -> V:0..3."""
 
@@ -144,6 +206,8 @@ class ArduinoLink:
         self.pressed_before = False
         self.last_press_at = 0.0
         self.last_lives_sent = 0.0
+        self.joystick = JoystickFilter()
+        self.last_packet_at = 0.0
         self.connect()
 
     @staticmethod
@@ -170,6 +234,7 @@ class ArduinoLink:
                 self.port_name = name
                 self.received.clear()
                 self.pressed_before = False
+                self.joystick.active = None
                 self.last_lives_sent = 0.0
                 print(f"Arduino conectado em {name} (115200 baud)")
                 return
@@ -187,6 +252,7 @@ class ArduinoLink:
         self.port_name = None
         self.received.clear()
         self.pressed_before = False
+        self.joystick.active = None
 
     def send_lives(self, lives: int, force=False):
         if self.connection is None:
@@ -223,16 +289,12 @@ class ArduinoLink:
                         continue
                 except (UnicodeError, ValueError):
                     continue
-                if INVERTER_X:
-                    x = 1023 - x
-                if INVERTER_Y:
-                    y = 1023 - y
-                dx, dy = x - 512, y - 512
-                if max(abs(dx), abs(dy)) >= LIMIAR_JOYSTICK:
-                    direction = ("R" if dx > 0 else "L") if abs(dx) >= abs(dy) else ("D" if dy > 0 else "U")
-                else:
-                    direction = None
+                # Preserva pulsos curtos mesmo quando a ultima amostra ja esta neutra.
+                decoded_direction = self.joystick.read(x, y)
+                if decoded_direction is not None:
+                    direction = decoded_direction
                 now = time.monotonic()
+                self.last_packet_at = now
                 active = pressed == 1
                 if active and not self.pressed_before and now - self.last_press_at >= 0.25:
                     button_edge = True
@@ -385,6 +447,7 @@ class PacmanGame:
         self.invulnerable = 0.0
         self.requested = "R"
         self.current = "R"
+        self.turn_buffer_age = 0.0
         self.player = (1, 1)
         self.player_target = self.player
         self.player_progress = 0.0
@@ -413,6 +476,7 @@ class PacmanGame:
         self.player_target = self.spawn
         self.player_progress = 0.0
         self.current = self.requested = "R"
+        self.turn_buffer_age = 0.0
         self.power_time = 0.0
         self.invulnerable = 1.15
         walkable = {(x, y) for y in range(ROWS) for x in range(COLS)
@@ -518,6 +582,19 @@ class PacmanGame:
             self.state = "level_clear"
             self.sounds.play("win")
 
+    def request_direction(self, direction: str):
+        if direction in VECTORS:
+            self.requested = direction
+            self.turn_buffer_age = 0.0
+
+    def reverse_in_place(self):
+        """Inverte imediatamente e sem salto durante o percurso entre celulas."""
+        if (self.player != self.player_target and self.player_progress > 0
+                and self.requested == OPPOSITE[self.current]):
+            self.player, self.player_target = self.player_target, self.player
+            self.player_progress = 1.0 - self.player_progress
+            self.current = self.requested
+
     def choose_player_direction(self):
         for candidate in (self.requested, self.current):
             dx, dy = VECTORS[candidate]
@@ -529,6 +606,7 @@ class PacmanGame:
         return False
 
     def advance_player(self, dt):
+        self.reverse_in_place()
         remainder = dt
         for _ in range(5):  # lida com atrasos eventuais sem travar a renderização
             if self.player_target == self.player and not self.choose_player_direction():
@@ -617,6 +695,7 @@ class PacmanGame:
                     self.player = self.player_target = self.spawn
                     self.player_progress = 0.0
                     self.requested = self.current = "R"
+                    self.turn_buffer_age = 0.0
                     self.invulnerable = 2.0
                     self.power_time = 0.0
                     for reset in self.ghosts:
@@ -628,8 +707,14 @@ class PacmanGame:
 
     def update(self, dt):
         direction, pressed = self.link.poll()
-        if self.state == "running" and direction:
-            self.requested = direction
+        if self.state == "running":
+            if direction:
+                self.request_direction(direction)
+            else:
+                self.turn_buffer_age += dt
+                # Uma puxada rapida funciona na proxima esquina, mas nao minutos depois.
+                if self.turn_buffer_age > JOY_TURN_BUFFER:
+                    self.requested = self.current
         if pressed:
             self.handle_action()
         self.link.send_lives(self.lives)
@@ -719,11 +804,13 @@ class PacmanGame:
     def draw_footer(self):
         pygame.draw.rect(self.screen, PANEL, (12, BOARD_Y + BOARD_H + 10, WIDTH - 24, 61), border_radius=11)
         link_text = f"ARDUINO {self.link.port_name}" if self.link.connection else "TECLADO / USB OFF"
+        if self.link.connection and hasattr(self.link, "joystick"):
+            link_text += f"  |  JOY {self.link.joystick.threshold}"
         self.text(f"{self.player_name[:14]}  |  {link_text}", self.font_tiny,
                   GREEN if self.link.connection else MUTED, (24, BOARD_Y + BOARD_H + 19))
         self.text(f"RECORDE: {max(self.ranking.record, self.score)}", self.font_tiny, CYAN,
                   (420, BOARD_Y + BOARD_H + 19))
-        self.text("JOYSTICK / WASD / SETAS: MOVER   |   ESPACO: PAUSA   |   TAB: RANKING   |   M: SOM",
+        self.text("SETAS: MOVER  |  C: CALIBRAR  |  F7/F8: SENSIB.  |  TAB: RANK  |  M: SOM",
                   self.font_tiny, MUTED, (22, BOARD_Y + BOARD_H + 46))
 
     def modal_base(self, top=174, height=414):
@@ -835,6 +922,21 @@ class PacmanGame:
         elif event.key == pygame.K_F5:
             self.link.connect()
             self.link.send_lives(self.lives, force=True)
+        elif event.key == pygame.K_c and self.state in ("running", "paused"):
+            joystick = getattr(self.link, "joystick", None)
+            if joystick is not None:
+                if joystick.calibrate():
+                    self.requested = self.current
+                    self.turn_buffer_age = JOY_TURN_BUFFER + 1
+                    print(f"Joystick calibrado: X={joystick.center_x}, Y={joystick.center_y}")
+                else:
+                    print("Calibracao indisponivel: aguarde leituras do joystick.")
+        elif event.key in (pygame.K_F7, pygame.K_F8):
+            joystick = getattr(self.link, "joystick", None)
+            if joystick is not None:
+                joystick.change_sensitivity(-20 if event.key == pygame.K_F7 else 20)
+                print(f"Joystick: sensibilidade {'aumentada' if event.key == pygame.K_F7 else 'reduzida'} "
+                      f"(limiar: {joystick.threshold}; menor = mais sensivel).")
         elif event.key == pygame.K_TAB:
             self.toggle_ranking()
         elif self.state == "menu":
@@ -848,7 +950,7 @@ class PacmanGame:
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_p):
             self.handle_action()
         elif self.state == "running" and event.key in directions:
-            self.requested = directions[event.key]
+            self.request_direction(directions[event.key])
         elif self.state == "running" and event.key == pygame.K_m:
             self.sounds.toggle()
         elif event.key == pygame.K_r:
