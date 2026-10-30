@@ -1,4 +1,4 @@
-"""PAC-MAN DELUXE v3 | Arduino + joystick ajustavel + ranking local.
+"""PAC-MAN DELUXE v4 | Arduino + joystick + ranking SQLite.
 
 Python 3.14: pygame-ce (import pygame) e pyserial.
 Firmware anterior continua compativel; recomendado o novo sketch de 50 Hz.
@@ -6,17 +6,16 @@ Firmware anterior continua compativel; recomendado o novo sketch de 50 Hz.
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import random
 import time
 from array import array
 from collections import deque
-from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
 import pygame
+
+from ranking_db import Ranking, normalize_name, DATABASE_FILE
 
 try:
     import serial
@@ -32,7 +31,7 @@ BOARD_H = ROWS * CELL
 WIDTH, HEIGHT = COLS * CELL, BOARD_Y + BOARD_H + 83
 FPS = 60
 BAUD = 115200
-SCORE_FILE = Path(__file__).with_name("ranking.json")
+SCORE_FILE = DATABASE_FILE
 
 # Ajustes de dificuldade: números maiores = movimentação MAIS LENTA.
 PACMAN_STEP_SECONDS = 0.126
@@ -69,74 +68,6 @@ RED = (255, 107, 122)
 GHOST_COLORS = ((251, 91, 103), (255, 156, 205), (91, 221, 248))
 VECTORS = {"U": (0, -1), "D": (0, 1), "L": (-1, 0), "R": (1, 0)}
 OPPOSITE = {"U": "D", "D": "U", "L": "R", "R": "L"}
-
-
-def normalize_name(value: str) -> str:
-    """Limita texto recebido do teclado/JSON sem rejeitar acentos do português."""
-    clean = "".join(c for c in value if c.isprintable() and c not in "\r\n\t")
-    return clean.strip()[:14] or "JOGADOR"
-
-
-class Ranking:
-    """Top 10 persistente em JSON, sem depender de internet ou Arduino."""
-
-    def __init__(self, filename: Path = SCORE_FILE):
-        self.filename = Path(filename)
-        self.entries: list[dict] = []
-        self.load()
-
-    def load(self):
-        try:
-            raw = json.loads(self.filename.read_text(encoding="utf-8"))
-            data = raw.get("scores", []) if isinstance(raw, dict) else []
-            clean = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                score, level = item.get("score"), item.get("level")
-                if type(score) is not int or type(level) is not int or score < 0 or level < 1:
-                    continue
-                clean.append({
-                    "id": str(item.get("id", ""))[:36],
-                    "name": normalize_name(str(item.get("name", "JOGADOR"))),
-                    "score": min(score, 99999999),
-                    "level": min(level, 999),
-                    "date": str(item.get("date", ""))[:20],
-                })
-            self.entries = self._sort(clean)[:10]
-        except FileNotFoundError:
-            self.entries = []
-        except (OSError, UnicodeError, ValueError, TypeError) as exc:
-            print(f"Ranking não pôde ser lido ({exc}); iniciando tabela vazia.")
-            self.entries = []
-
-    @staticmethod
-    def _sort(entries):
-        return sorted(entries, key=lambda x: (-x["score"], -x["level"], x["date"]))
-
-    @property
-    def record(self):
-        return self.entries[0]["score"] if self.entries else 0
-
-    def add(self, name: str, score: int, level: int) -> str | None:
-        entry = {
-            "id": uuid4().hex,
-            "name": normalize_name(name),
-            "score": max(0, int(score)),
-            "level": max(1, int(level)),
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-        self.entries = self._sort(self.entries + [entry])[:10]
-        try:
-            # Arquivo temporário + replace: evita ranking truncado em caso de erro.
-            self.filename.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.filename.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"version": 1, "scores": self.entries},
-                                      ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.filename)
-        except OSError as exc:
-            print(f"Aviso: não foi possível salvar ranking: {exc}")
-        return entry["id"] if entry in self.entries else None
 
 
 class JoystickFilter:
@@ -810,7 +741,7 @@ class PacmanGame:
                   GREEN if self.link.connection else MUTED, (24, BOARD_Y + BOARD_H + 19))
         self.text(f"RECORDE: {max(self.ranking.record, self.score)}", self.font_tiny, CYAN,
                   (420, BOARD_Y + BOARD_H + 19))
-        self.text("SETAS: MOVER  |  C: CALIBRAR  |  F7/F8: SENSIB.  |  TAB: RANK  |  M: SOM",
+        self.text("SETAS: MOVER | C: CALIBRAR | F6: SALVAR | TAB: RANK | F7/F8: JOY",
                   self.font_tiny, MUTED, (22, BOARD_Y + BOARD_H + 46))
 
     def modal_base(self, top=174, height=414):
@@ -843,12 +774,12 @@ class PacmanGame:
                   MUTED, (WIDTH // 2, 453), center=True)
         self.text(f"MELHOR PONTUACAO: {self.ranking.record}", self.font_medium, YELLOW,
                   (WIDTH // 2, 512), center=True)
-        self.text("A cada derrota, a pontuacao entra no ranking local.", self.font_tiny,
+        self.text("Partidas salvas no SQLite ao perder ou apertar F6.", self.font_tiny,
                   MUTED, (WIDTH // 2, 545), center=True)
 
     def draw_ranking(self):
         self.modal_base(156, 460)
-        self.text("TOP 10  |  RANKING LOCAL", self.font_big, YELLOW,
+        self.text("TOP 10  |  RANKING SQLITE", self.font_big, YELLOW,
                   (WIDTH // 2, 196), center=True)
         self.text("POS    NOME                  PONTOS   FASE", self.font_small,
                   CYAN, (101, 238))
@@ -878,8 +809,9 @@ class PacmanGame:
         self.text(f"FASE ALCANCADA: {self.level}", self.font_small, CYAN,
                   (WIDTH // 2, 366), center=True)
         entered = any(e["id"] == self.last_rank_id for e in self.ranking.entries)
-        self.text("ENTROU NO TOP 10!" if entered else "BOA PARTIDA!", self.font_medium,
-                  GREEN if entered else MUTED, (WIDTH // 2, 417), center=True)
+        self.text("ERRO AO SALVAR RANKING" if self.ranking.last_save_ok is False else
+                  ("ENTROU NO TOP 10!" if entered else "PARTIDA SALVA NO BANCO"), self.font_medium,
+                  RED if self.ranking.last_save_ok is False else (GREEN if entered else MUTED), (WIDTH // 2, 417), center=True)
         self.text("TAB: RANKING", self.font_small, CYAN, (WIDTH // 2, 482), center=True)
         self.text("ENTER / BOTAO: NOVO JOGO E DIGITAR NOME", self.font_small,
                   WHITE, (WIDTH // 2, 528), center=True)
@@ -919,6 +851,11 @@ class PacmanGame:
                 self.handle_action()
             else:
                 self.running = False
+        elif event.key == pygame.K_F6 and self.state in ("running", "paused"):
+            # Permite testar o salvamento sem esperar perder as tres vidas.
+            self.lives = 0
+            self.link.send_lives(0, force=True)
+            self.finish_game()
         elif event.key == pygame.K_F5:
             self.link.connect()
             self.link.send_lives(self.lives, force=True)
@@ -979,8 +916,8 @@ def main():
     parser = argparse.ArgumentParser(description="PAC-MAN DELUXE com joystick Arduino e ranking")
     parser.add_argument("--port", help="Porta USB (ex.: COM3)")
     parser.add_argument("--list-ports", action="store_true", help="Exibe portas USB seriais")
-    parser.add_argument("--scores", type=Path, default=SCORE_FILE,
-                        help="Caminho para salvar o ranking (padrão: ranking.json na pasta do jogo)")
+    parser.add_argument("--scores", "--db", type=Path, default=SCORE_FILE,
+                        help="Arquivo SQLite (padrao: ranking.db na pasta do jogo)")
     parser.add_argument("--no-audio", action="store_true", help="Desabilita efeitos sonoros")
     args = parser.parse_args()
     if args.list_ports:
