@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "scores": [
+    {
+      "id": "26ad52f5f2d04941b17d51c703835b37",
+      "name": "ze",
+      "score": 3310,
+      "level": 1,
+      "date": "2026-10-28 16:35"
+    },
+    {
+      "id": "ee6225f4a45946b8b43a5ff96fc0b5b8",
+      "name": "ana",
+      "score": 2290,
+      "level": 1,
+      "date": "2026-10-30 08:57"
+    },
+    {
+      "id": "b4d5685f4cba4f5faecb8f075be5527a",
+      "name": "Renan",
+      "score": 2270,
+      "level": 1,
+      "date": "2026-10-28 16:44"
+    },
+    {
+      "id": "86179fd41c354bb09c3b9119c9534a07",
+      "name": "vitor",
+      "score": 2130,
+      "level": 1,
+      "date": "2026-10-28 16:37"
+    },
+    {
+      "id": "ab95f5689ced4917ad44084e8b6c8b5a",
+      "name": "Ana",
+      "score": 2120,
+      "level": 1,
+      "date": "2026-10-30 09:24"
+    },
+    {
+      "id": "39ede6d7cb0f4a5b98bbf29de0b3ed8c",
+      "name": "c",
+      "score": 1880,
+      "level": 1,
+      "date": "2026-10-28 16:51"
+    },
+    {
+      "id": "fdd5480f572d4904a0c626cf186f18b0",
+      "name": "Renan",
+      "score": 1000,
+      "level": 1,
+      "date": "2026-10-28 16:42"
+    },
+    {
+      "id": "5fd1b73d9e3a456aa0fb2bf765d31554",
+      "name": "Ana",
+      "score": 730,
+      "level": 1,
+      "date": "2026-10-30 09:26"
+    },
+    {
+      "id": "d9f130f4161b462aa5869c5fc3f71f6f",
+      "name": "ze",
+      "score": 440,
+      "level": 1,
+      "date": "2026-10-28 16:34"
+    },
+    {
+      "id": "e125a5e7adbf473098e65c681c32ff18",
+      "name": "ze",
+      "score": 120,
+      "level": 1,
+      "date": "2026-10-28 16:36"
+    }
+  ]
+}
