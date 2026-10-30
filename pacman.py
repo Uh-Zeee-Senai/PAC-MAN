@@ -1,4 +1,4 @@
-"""PAC-MAN DELUXE v4 | Arduino + joystick + ranking SQLite.
+"""PAC-MAN DELUXE v5 | Tela cheia + pagina dedicada ao ranking SQLite.
 
 Python 3.14: pygame-ce (import pygame) e pyserial.
 Firmware anterior continua compativel; recomendado o novo sketch de 50 Hz.
@@ -26,9 +26,9 @@ except ImportError:
 
 COLS, ROWS = 23, 19
 CELL = 28
-BOARD_Y = 112
-BOARD_H = ROWS * CELL
-WIDTH, HEIGHT = COLS * CELL, BOARD_Y + BOARD_H + 83
+BOARD_X, BOARD_Y = 65, 164
+BOARD_W, BOARD_H = COLS * CELL, ROWS * CELL
+WIDTH, HEIGHT = 1280, 800
 FPS = 60
 BAUD = 115200
 SCORE_FILE = DATABASE_FILE
@@ -350,15 +350,23 @@ class PacmanGame:
     def __init__(self, link: ArduinoLink, rankings_path: Path = SCORE_FILE, no_audio=False):
         pygame.mixer.pre_init(22050, -16, 1, 512)
         pygame.init()
-        pygame.display.set_caption("PAC-MAN DELUXE | Arduino Edition")
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("PAC-MAN DELUXE v5 | Tela cheia + Ranking")
+        self.fullscreen = False
+        self.display = None
+        self.configure_display(fullscreen=True)
+        self.screen = pygame.Surface((WIDTH, HEIGHT)).convert()
+        self.viewport = pygame.Rect(0, 0, WIDTH, HEIGHT)
+        self.ui_buttons = {}
         self.clock = pygame.time.Clock()
-        self.font_title = pygame.font.SysFont("arial", 39, bold=True)
-        self.font_big = pygame.font.SysFont("arial", 30, bold=True)
-        self.font_medium = pygame.font.SysFont("arial", 19, bold=True)
-        self.font_body = pygame.font.SysFont("arial", 17)
-        self.font_small = pygame.font.SysFont("consolas", 14)
-        self.font_tiny = pygame.font.SysFont("consolas", 12)
+        self.font_hero = pygame.font.SysFont("arial", 94, bold=True)
+        self.font_title = pygame.font.SysFont("arial", 45, bold=True)
+        self.font_big = pygame.font.SysFont("arial", 33, bold=True)
+        self.font_medium = pygame.font.SysFont("arial", 24, bold=True)
+        self.font_body = pygame.font.SysFont("arial", 20)
+        self.font_small = pygame.font.SysFont("arial", 17, bold=True)
+        self.font_tiny = pygame.font.SysFont("consolas", 15)
+        self.font_number = pygame.font.SysFont("consolas", 36, bold=True)
+
         self.link = link
         self.ranking = Ranking(rankings_path)
         self.sounds = SoundFX(disabled=no_audio)
@@ -387,7 +395,7 @@ class PacmanGame:
         self.static_layer = None
         self.stars = [(random.Random(i * 143).randrange(WIDTH),
                        random.Random(i * 987).randrange(HEIGHT), i % 3 + 1)
-                      for i in range(38)]
+                      for i in range(53)]
         self.load_level()
         self.link.send_lives(self.lives, force=True)
         pygame.key.start_text_input()
@@ -430,7 +438,7 @@ class PacmanGame:
         self.make_static_layer()
 
     def make_static_layer(self):
-        self.static_layer = pygame.Surface((WIDTH, BOARD_H)).convert()
+        self.static_layer = pygame.Surface((BOARD_W, BOARD_H)).convert()
         self.static_layer.fill(BOARD)
         for y in range(ROWS):
             for x in range(COLS):
@@ -480,12 +488,14 @@ class PacmanGame:
             self.state = "paused"
 
     def toggle_ranking(self):
-        if self.state in ("menu", "game_over", "paused"):
-            self.previous_screen = self.state
+        if self.state == "ranking":
+            self.handle_action()
+        elif self.state in ("menu", "game_over", "paused", "running"):
+            # Abrir no meio da partida nao deve deixar os fantasmas em movimento.
+            self.previous_screen = "paused" if self.state == "running" else self.state
+            self.ranking.load()
             self.state = "ranking"
             pygame.key.stop_text_input()
-        elif self.state == "ranking":
-            self.handle_action()
 
     def input_name(self, value: str):
         if self.state == "menu":
@@ -659,10 +669,108 @@ class PacmanGame:
         self.advance_ghosts(dt)
         self.check_collisions()
 
-    def text(self, value, font, color, pos, center=False):
+    def configure_display(self, fullscreen: bool):
+        """Renderiza sempre no tamanho lógico 1280x800 e redimensiona ao monitor.
+
+        Evita coordenadas quebradas em monitores 1366x768, 1920x1080 e 4K.
+        """
+        try:
+            if fullscreen:
+                self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            else:
+                sizes = pygame.display.get_desktop_sizes()
+                sw, sh = sizes[0] if sizes else (1280, 800)
+                self.display = pygame.display.set_mode(
+                    (min(1280, max(640, sw - 100)), min(800, max(480, sh - 100))),
+                    pygame.RESIZABLE)
+            self.fullscreen = fullscreen
+        except pygame.error as exc:
+            print(f"Modo de vídeo solicitado indisponível: {exc}; abrindo janela.")
+            self.display = pygame.display.set_mode((1100, 690), pygame.RESIZABLE)
+            self.fullscreen = False
+
+    def toggle_fullscreen(self):
+        self.configure_display(not self.fullscreen)
+
+    def to_logical_pos(self, physical_pos):
+        ww, wh = self.display.get_size()
+        scale = min(ww / WIDTH, wh / HEIGHT)
+        ox = round((ww - WIDTH * scale) / 2)
+        oy = round((wh - HEIGHT * scale) / 2)
+        mx, my = physical_pos
+        if not (ox <= mx < ox + WIDTH * scale and oy <= my < oy + HEIGHT * scale):
+            return None
+        return (round((mx - ox) / scale), round((my - oy) / scale))
+
+    def present(self):
+        ww, wh = self.display.get_size()
+        if ww <= 0 or wh <= 0:
+            return
+        scale = min(ww / WIDTH, wh / HEIGHT)
+        tw, th = max(1, round(WIDTH * scale)), max(1, round(HEIGHT * scale))
+        ox, oy = (ww - tw) // 2, (wh - th) // 2
+        self.display.fill((2, 5, 13))
+        if (tw, th) == (WIDTH, HEIGHT):
+            self.display.blit(self.screen, (ox, oy))
+        else:
+            # Nearest-neighbor: bordas nítidas e menos custo CPU que smoothscale.
+            self.display.blit(pygame.transform.scale(self.screen, (tw, th)), (ox, oy))
+        pygame.display.flip()
+
+    def text(self, value, font, color, pos, center=False, right=False):
         surface = font.render(str(value), True, color)
-        bounds = surface.get_rect(center=pos) if center else surface.get_rect(topleft=pos)
+        if center:
+            bounds = surface.get_rect(center=pos)
+        elif right:
+            bounds = surface.get_rect(topright=pos)
+        else:
+            bounds = surface.get_rect(topleft=pos)
         self.screen.blit(surface, bounds)
+        return bounds
+
+    def card(self, rect, fill=PANEL, stroke=(39, 67, 111), radius=17):
+        rect = pygame.Rect(rect)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=radius)
+        pygame.draw.rect(self.screen, stroke, rect, 1, border_radius=radius)
+        return rect
+
+    def button(self, key, label, rect, variant="primary", font=None):
+        rect = pygame.Rect(rect)
+        self.ui_buttons[key] = rect
+        if variant == "primary":
+            fill, stroke, color = (244, 195, 51), (255, 233, 122), (18, 28, 48)
+        elif variant == "danger":
+            fill, stroke, color = (91, 31, 52), (226, 99, 119), WHITE
+        else:
+            fill, stroke, color = (24, 44, 78), (67, 117, 176), WHITE
+        # O efeito hover usa coordenadas corrigidas para letterbox/fullscreen.
+        try:
+            point = self.to_logical_pos(pygame.mouse.get_pos())
+        except pygame.error:
+            point = None
+        hovered = point is not None and rect.collidepoint(point)
+        if hovered:
+            fill = tuple(min(255, c + 22) for c in fill)
+        self.card(rect, fill, stroke, 13)
+        self.text(label, font or self.font_small, color, rect.center, center=True)
+
+    def draw_background(self):
+        self.screen.fill(BG)
+        pygame.draw.rect(self.screen, (11, 20, 44), (0, 0, WIDTH, 120))
+        pygame.draw.line(self.screen, (30, 52, 88), (0, 120), (WIDTH, 120), 1)
+        for x, y, r in self.stars:
+            pygame.draw.circle(self.screen, (27, 45, 79), (x, y), r)
+        # Deixa a barra inferior com limites claros.
+        pygame.draw.line(self.screen, (30, 52, 88), (0, 785), (WIDTH, 785), 1)
+
+    def draw_header(self, heading="PAC-MAN", subtitle="DELUXE • ARDUINO EDITION"):
+        self.draw_pacman(75, 59, 23, "R", pygame.time.get_ticks() / 1000)
+        self.text(heading, self.font_big, YELLOW, (112, 22))
+        self.text(subtitle, self.font_tiny, CYAN, (114, 68))
+        status = f"●  ARDUINO {self.link.port_name}" if self.link.connection else "●  MODO TECLADO"
+        self.card((975, 37, 231, 43), (18, 36, 63), (37, 83, 113), 22)
+        self.text(status, self.font_tiny, GREEN if self.link.connection else MUTED,
+                  (1090, 59), center=True)
 
     def draw_pacman(self, x, y, radius, direction, t):
         pygame.draw.circle(self.screen, YELLOW, (round(x), round(y)), radius)
@@ -687,172 +795,246 @@ class PacmanGame:
             pygame.draw.circle(self.screen, WHITE, (ix + offset, iy - 3), 4)
             pygame.draw.circle(self.screen, (19, 43, 99), (ix + offset + 1, iy - 2), 2)
 
-    def draw_hud(self, t):
-        pygame.draw.rect(self.screen, PANEL, (12, 9, WIDTH - 24, 90), border_radius=14)
-        self.draw_pacman(36, 34, 13, "R", t)
-        self.text("PAC-MAN", self.font_medium, YELLOW, (58, 17))
-        self.text("DELUXE / ARDUINO", self.font_tiny, CYAN, (58, 46))
-        self.text(f"{self.score:06d}", self.font_big, WHITE, (256, 11))
-        self.text("PONTOS", self.font_tiny, MUTED, (258, 54))
-        self.text(f"FASE {self.level}", self.font_small, CYAN, (393, 25))
-        for i in range(3):
-            x = 522 + i * 31
-            color = YELLOW if i < self.lives else (57, 70, 102)
-            pygame.draw.circle(self.screen, color, (x, 35), 10)
-            if i < self.lives:
-                pygame.draw.polygon(self.screen, PANEL,
-                                    [(x, 35), (x + 12, 29), (x + 12, 41)])
-        self.text("VIDAS", self.font_tiny, MUTED, (532, 54))
-        x, y, w = 13, 104, WIDTH - 26
-        pygame.draw.rect(self.screen, (37, 48, 82), (x, y, w, 4), border_radius=2)
-        completed = self.pellets_start - len(self.pellets) - len(self.power_pellets)
-        progress = max(0, min(w, int(w * completed / self.pellets_start)))
-        if progress:
-            pygame.draw.rect(self.screen, GREEN, (x, y, progress, 4), border_radius=2)
-
     def draw_board(self, t):
-        self.screen.blit(self.static_layer, (0, BOARD_Y))
+        # Um painel físico no layout, sem ampliar as células do labirinto.
+        self.card((BOARD_X - 10, BOARD_Y - 10, BOARD_W + 20, BOARD_H + 20),
+                  (17, 30, 59), (51, 109, 211), 15)
+        self.screen.blit(self.static_layer, (BOARD_X, BOARD_Y))
         for x, y in self.pellets:
-            pos = (x * CELL + CELL // 2, BOARD_Y + y * CELL + CELL // 2)
+            pos = (BOARD_X + x * CELL + CELL // 2, BOARD_Y + y * CELL + CELL // 2)
             pygame.draw.circle(self.screen, (251, 219, 171), pos, 3)
         for x, y in self.power_pellets:
-            pos = (x * CELL + CELL // 2, BOARD_Y + y * CELL + CELL // 2)
+            pos = (BOARD_X + x * CELL + CELL // 2, BOARD_Y + y * CELL + CELL // 2)
             size = round(6 + 2 * abs(math.sin(t * 4)))
             pygame.draw.circle(self.screen, PINK, pos, size)
             pygame.draw.circle(self.screen, WHITE, pos, 2)
         px, py = self.player_float_pos()
         if self.invulnerable <= 0 or int(t * 8) % 2 == 0:
-            self.draw_pacman(px * CELL + CELL // 2, BOARD_Y + py * CELL + CELL // 2,
-                             11, self.current, t)
+            self.draw_pacman(BOARD_X + px * CELL + CELL // 2,
+                             BOARD_Y + py * CELL + CELL // 2, 11, self.current, t)
         for ghost in self.ghosts:
             gx, gy = self.ghost_float_pos(ghost)
-            self.draw_ghost(gx * CELL + CELL // 2, BOARD_Y + gy * CELL + CELL // 2,
+            self.draw_ghost(BOARD_X + gx * CELL + CELL // 2,
+                            BOARD_Y + gy * CELL + CELL // 2,
                             ghost["color"], t, self.power_time > 0)
         if self.power_time > 0 and self.state == "running":
+            self.card((BOARD_X + 250, BOARD_Y + 8, 145, 31), (18, 28, 75), (92, 98, 240), 12)
             self.text(f"PODER {self.power_time:0.1f}s", self.font_small, PINK,
-                      (WIDTH // 2, BOARD_Y + 14), center=True)
+                      (BOARD_X + 323, BOARD_Y + 23), center=True)
+
+    def draw_sidebar(self):
+        sx, sw = 734, 482
+        self.card((sx, BOARD_Y - 10, sw, 156))
+        self.text("PONTUAÇÃO", self.font_tiny, MUTED, (sx + 24, 172))
+        self.text(f"{self.score:07d}", self.font_number, WHITE, (sx + 24, 201))
+        self.text("RECORDE", self.font_tiny, MUTED, (sx + 295, 172))
+        self.text(f"{max(self.ranking.record, self.score):07d}", self.font_medium,
+                  YELLOW, (sx + 295, 208))
+        pygame.draw.line(self.screen, (42, 67, 106), (sx + 24, 259), (sx + sw - 24, 259), 1)
+        self.text(f"FASE {self.level:02d}", self.font_small, CYAN, (sx + 25, 271))
+        for i in range(3):
+            cx = sx + 337 + i * 38
+            color = YELLOW if i < self.lives else (57, 70, 102)
+            pygame.draw.circle(self.screen, color, (cx, 281), 12)
+            if i < self.lives:
+                pygame.draw.polygon(self.screen, PANEL, ((cx, 281), (cx + 14, 273), (cx + 14, 289)))
+        self.card((sx, 324, sw, 157))
+        self.text("PROGRESSO DO LABIRINTO", self.font_small, WHITE, (sx + 25, 343))
+        done = self.pellets_start - len(self.pellets) - len(self.power_pellets)
+        percent = max(0, min(100, round(done * 100 / max(1, self.pellets_start))))
+        self.text(f"{percent}%", self.font_medium, GREEN, (sx + 423, 341), right=True)
+        pygame.draw.rect(self.screen, (39, 53, 77), (sx + 25, 391, 430, 16), border_radius=8)
+        if percent:
+            pygame.draw.rect(self.screen, GREEN, (sx + 25, 391, round(430 * percent / 100), 16), border_radius=8)
+        self.text(f"{done} de {self.pellets_start} pontos coletados", self.font_tiny,
+                  MUTED, (sx + 25, 429))
+        self.card((sx, 499, sw, 195))
+        self.text("TOP 3  •  RANKING LOCAL", self.font_small, CYAN, (sx + 25, 520))
+        if not self.ranking.entries:
+            self.text("Ainda não há partidas salvas.", self.font_body, MUTED,
+                      (sx + 25, 564))
+        else:
+            for i, entry in enumerate(self.ranking.entries[:3]):
+                y = 556 + i * 35
+                self.text(f"{i+1:02d}", self.font_small, YELLOW if i == 0 else MUTED,
+                          (sx + 25, y))
+                self.text(entry['name'][:14], self.font_small, WHITE, (sx + 80, y))
+                self.text(f"{entry['score']:,}".replace(',', '.'), self.font_small,
+                          CYAN, (sx + 445, y), right=True)
+        self.button("ranking", "VER RANKING COMPLETO  [TAB]", (sx + 92, 652, 312, 34), "secondary", self.font_tiny)
 
     def draw_footer(self):
-        pygame.draw.rect(self.screen, PANEL, (12, BOARD_Y + BOARD_H + 10, WIDTH - 24, 61), border_radius=11)
-        link_text = f"ARDUINO {self.link.port_name}" if self.link.connection else "TECLADO / USB OFF"
-        if self.link.connection and hasattr(self.link, "joystick"):
-            link_text += f"  |  JOY {self.link.joystick.threshold}"
-        self.text(f"{self.player_name[:14]}  |  {link_text}", self.font_tiny,
-                  GREEN if self.link.connection else MUTED, (24, BOARD_Y + BOARD_H + 19))
-        self.text(f"RECORDE: {max(self.ranking.record, self.score)}", self.font_tiny, CYAN,
-                  (420, BOARD_Y + BOARD_H + 19))
-        self.text("SETAS: MOVER | C: CALIBRAR | F6: SALVAR | TAB: RANK | F7/F8: JOY",
-                  self.font_tiny, MUTED, (22, BOARD_Y + BOARD_H + 46))
+        self.card((55, 719, 1161, 58), (12, 23, 47), (34, 57, 96), 13)
+        self.text(f"{self.player_name[:14].upper()}  •  {self.level:02d}ª FASE",
+                  self.font_tiny, CYAN, (77, 740))
+        self.text("SETAS/WASD mover   •   C calibrar   •   F6 salvar   •   F11 tela cheia",
+                  self.font_tiny, MUTED, (1220, 740), right=True)
 
-    def modal_base(self, top=174, height=414):
-        veil = pygame.Surface((WIDTH, BOARD_H), pygame.SRCALPHA)
-        veil.fill((2, 7, 22, 213))
-        self.screen.blit(veil, (0, BOARD_Y))
-        box = pygame.Rect(52, top, WIDTH - 104, height)
-        pygame.draw.rect(self.screen, PANEL, box, border_radius=21)
-        pygame.draw.rect(self.screen, WALL_EDGE, box, 2, border_radius=21)
-        return box
+    def draw_game(self, t):
+        self.draw_header()
+        self.draw_board(t)
+        self.draw_sidebar()
+        self.draw_footer()
+        self.button("fullscreen", "TELA CHEIA  [F11]" if not self.fullscreen else "JANELA  [F11]",
+                    (748, 95, 195, 36), "secondary", self.font_tiny)
 
     def draw_menu(self, t):
-        box = self.modal_base(171, 418)
-        self.draw_pacman(WIDTH // 2 - 98, 225, 16, "R", t)
-        self.text("PAC-MAN DELUXE", self.font_big, YELLOW, (WIDTH // 2 + 12, 225), center=True)
-        self.text("JOYSTICK + 3 LEDS + RANKING", self.font_small, CYAN,
-                  (WIDTH // 2, 263), center=True)
-        self.text("DIGITE O NOME DO JOGADOR", self.font_small, WHITE, (96, 311))
-        input_rect = pygame.Rect(92, 336, WIDTH - 184, 50)
-        pygame.draw.rect(self.screen, PANEL_LIGHT, input_rect, border_radius=9)
-        pygame.draw.rect(self.screen, CYAN, input_rect, 2, border_radius=9)
-        label = self.name if self.name else "JOGADOR"
-        self.text(label, self.font_medium, WHITE if self.name else MUTED, (105, 347))
+        self.draw_header()
+        self.card((73, 148, 687, 563), (13, 24, 52), (39, 84, 145), 22)
+        self.text("JOGUE, MARQUE", self.font_medium, CYAN, (105, 181))
+        self.text("PAC-MAN", self.font_hero, YELLOW, (99, 210))
+        self.text("DELUXE", self.font_title, WHITE, (104, 318))
+        self.text("Arcade clássico com controle Arduino e ranking SQL.",
+                  self.font_body, MUTED, (105, 381))
+        self.text("NOME DO JOGADOR", self.font_small, CYAN, (105, 440))
+        rect = self.card((104, 471, 625, 61), (22, 40, 76), (83, 151, 210), 10)
+        self.text(self.name if self.name else "Digite seu nome aqui...", self.font_medium,
+                  WHITE if self.name else MUTED, (123, 484))
         if int(t * 2) % 2 == 0 and len(self.name) < 14:
-            xpos = min(input_rect.right - 12, 105 + self.font_medium.size(self.name)[0] + 3)
-            pygame.draw.line(self.screen, CYAN, (xpos, 347), (xpos, 368), 2)
-        self.text("ENTER / BOTAO DO JOYSTICK: COMECAR", self.font_small, GREEN,
-                  (WIDTH // 2, 416), center=True)
-        self.text("TAB: VER TOP 10    |    F5: RECONECTAR ARDUINO", self.font_tiny,
-                  MUTED, (WIDTH // 2, 453), center=True)
-        self.text(f"MELHOR PONTUACAO: {self.ranking.record}", self.font_medium, YELLOW,
-                  (WIDTH // 2, 512), center=True)
-        self.text("Partidas salvas no SQLite ao perder ou apertar F6.", self.font_tiny,
-                  MUTED, (WIDTH // 2, 545), center=True)
+            tx = 123 + self.font_medium.size(self.name)[0]
+            pygame.draw.line(self.screen, CYAN, (tx, 484), (tx, 512), 2)
+        self.button("start", "▶  COMEÇAR JOGO", (104, 562, 297, 64), font=self.font_medium)
+        self.button("ranking", "★  VER RANKING", (422, 562, 307, 64), "secondary", self.font_medium)
+        self.text("ENTER OU BOTÃO DO JOYSTICK PARA COMEÇAR", self.font_tiny,
+                  MUTED, (107, 656))
+        self.card((785, 148, 426, 563), (14, 27, 55), (39, 84, 145), 22)
+        self.text("HALL DA FAMA", self.font_medium, YELLOW, (818, 183))
+        pygame.draw.line(self.screen, (48, 81, 120), (818, 234), (1180, 234), 1)
+        if self.ranking.entries:
+            for i, entry in enumerate(self.ranking.entries[:5]):
+                yy = 258 + i * 57
+                self.text(f"{i+1:02d}", self.font_medium, YELLOW if i == 0 else CYAN, (819, yy))
+                self.text(entry["name"], self.font_small, WHITE, (871, yy + 2))
+                self.text(str(entry["score"]), self.font_small, GREEN,
+                          (1176, yy + 2), right=True)
+                pygame.draw.line(self.screen, (37, 58, 93), (817, yy + 42), (1181, yy + 42), 1)
+        else:
+            self.text("O primeiro recorde pode ser seu!", self.font_body, MUTED, (818, 277))
+        self.text(f"RECORDE ATUAL: {self.ranking.record:,}".replace(',', '.'),
+                  self.font_small, CYAN, (817, 592))
+        self.text("Top 10 fica salvo no ranking.db", self.font_tiny, MUTED, (817, 638))
+        self.button("fullscreen", "F11  •  TELA CHEIA / JANELA", (790, 666, 414, 35), "secondary", self.font_tiny)
+        self.text("ESC: SAIR   •   TAB: RANKING", self.font_tiny, MUTED, (74, 738))
 
     def draw_ranking(self):
-        self.modal_base(156, 460)
-        self.text("TOP 10  |  RANKING SQLITE", self.font_big, YELLOW,
-                  (WIDTH // 2, 196), center=True)
-        self.text("POS    NOME                  PONTOS   FASE", self.font_small,
-                  CYAN, (101, 238))
+        self.draw_header("RANKING", "HALL DA FAMA • BANCO DE DADOS SQLITE")
+        self.text("OS 10 MELHORES JOGADORES", self.font_title, WHITE, (88, 151))
+        self.text("Pontuações gravadas automaticamente ao finalizar uma partida.",
+                  self.font_body, MUTED, (89, 211))
+        self.card((83, 259, 1114, 454), (14, 26, 55), (44, 78, 132), 17)
+        self.card((100, 276, 1080, 47), (27, 47, 82), (49, 86, 137), 10)
+        headers = [("POS.", 137), ("JOGADOR", 227), ("PONTOS", 782), ("FASE", 940), ("DATA / HORA", 1011)]
+        for label, x in headers:
+            self.text(label, self.font_tiny, CYAN, (x, 291))
         if not self.ranking.entries:
-            self.text("Ainda nao ha resultados. Jogue uma partida!", self.font_body, WHITE,
-                      (WIDTH // 2, 391), center=True)
+            self.text("SEM PONTUAÇÕES AINDA", self.font_big, MUTED, (640, 441), center=True)
+            self.text("Inicie uma partida e pressione F6 para salvar um resultado.",
+                      self.font_body, MUTED, (640, 493), center=True)
         else:
             for i, entry in enumerate(self.ranking.entries):
-                yy = 274 + i * 28
-                if entry["id"] == self.last_rank_id:
-                    pygame.draw.rect(self.screen, (33, 56, 92),
-                                     (91, yy - 3, WIDTH - 182, 27), border_radius=6)
-                tone = YELLOW if i == 0 else (GREEN if entry["id"] == self.last_rank_id else WHITE)
-                self.text(f"{i+1:02d}", self.font_small, tone, (104, yy))
-                self.text(entry["name"][:14], self.font_small, tone, (166, yy))
-                self.text(str(entry["score"]), self.font_small, tone, (414, yy))
-                self.text(str(entry["level"]), self.font_small, tone, (516, yy))
-        self.text("TAB / ENTER / BOTAO: VOLTAR", self.font_small, CYAN,
-                  (WIDTH // 2, 585), center=True)
+                y = 333 + i * 36
+                if i % 2 == 0:
+                    pygame.draw.rect(self.screen, (20, 37, 70), (100, y - 2, 1080, 35), border_radius=7)
+                if entry['id'] == self.last_rank_id:
+                    pygame.draw.rect(self.screen, (34, 77, 94), (100, y - 2, 1080, 35), border_radius=7)
+                tone = YELLOW if i == 0 else (GREEN if i < 3 else WHITE)
+                self.text(f"#{i+1:02d}", self.font_small, tone, (137, y + 3))
+                self.text(entry['name'][:14], self.font_small, WHITE, (227, y + 3))
+                self.text(f"{entry['score']:,}".replace(',', '.'), self.font_small, tone, (782, y + 3))
+                self.text(f"{entry['level']:02d}", self.font_small, WHITE, (944, y + 3))
+                when = str(entry['date'])[:16].replace('-', '/')
+                self.text(when, self.font_tiny, MUTED, (1011, y + 4))
+        self.button("back", "← VOLTAR", (88, 725, 220, 53), "secondary", self.font_medium)
+        self.text("TAB / ESC / ENTER / BOTÃO: VOLTAR", self.font_tiny, MUTED,
+                  (1210, 742), right=True)
 
     def draw_game_over(self):
-        self.modal_base(166, 432)
-        self.text("FIM DE JOGO", self.font_title, RED, (WIDTH // 2, 219), center=True)
-        self.text(self.player_name, self.font_medium, WHITE, (WIDTH // 2, 279), center=True)
-        self.text(f"{self.score:06d} PONTOS", self.font_big, YELLOW,
-                  (WIDTH // 2, 326), center=True)
-        self.text(f"FASE ALCANCADA: {self.level}", self.font_small, CYAN,
-                  (WIDTH // 2, 366), center=True)
-        entered = any(e["id"] == self.last_rank_id for e in self.ranking.entries)
-        self.text("ERRO AO SALVAR RANKING" if self.ranking.last_save_ok is False else
-                  ("ENTROU NO TOP 10!" if entered else "PARTIDA SALVA NO BANCO"), self.font_medium,
-                  RED if self.ranking.last_save_ok is False else (GREEN if entered else MUTED), (WIDTH // 2, 417), center=True)
-        self.text("TAB: RANKING", self.font_small, CYAN, (WIDTH // 2, 482), center=True)
-        self.text("ENTER / BOTAO: NOVO JOGO E DIGITAR NOME", self.font_small,
-                  WHITE, (WIDTH // 2, 528), center=True)
+        self.draw_header("FIM DE JOGO", "SUA PARTIDA FOI FINALIZADA")
+        self.card((208, 171, 864, 507), (16, 29, 60), (66, 105, 161), 25)
+        self.text("RESULTADO DA PARTIDA", self.font_medium, MUTED, (640, 218), center=True)
+        self.text(self.player_name, self.font_title, WHITE, (640, 271), center=True)
+        self.text(f"{self.score:07d}", self.font_hero, YELLOW, (640, 370), center=True)
+        self.text(f"PONTOS  •  FASE {self.level}", self.font_medium, CYAN, (640, 439), center=True)
+        entered = any(e['id'] == self.last_rank_id for e in self.ranking.entries)
+        message = ("ERRO AO SALVAR NO BANCO" if self.ranking.last_save_ok is False else
+                   "VOCÊ ENTROU NO TOP 10!" if entered else "PARTIDA SALVA NO SQLITE")
+        self.text(message, self.font_small,
+                  RED if self.ranking.last_save_ok is False else GREEN, (640, 499), center=True)
+        self.button("new", "↻  NOVO JOGO", (267, 568, 343, 66), font=self.font_medium)
+        self.button("ranking", "★  VER RANKING", (633, 568, 366, 66), "secondary", self.font_medium)
+        self.text("ENTER OU BOTÃO: NOVO JOGO  •  TAB: RANKING", self.font_tiny,
+                  MUTED, (640, 732), center=True)
 
     def draw_pause_or_level(self):
-        self.modal_base(218, 300)
-        title = "FASE CONCLUIDA!" if self.state == "level_clear" else "PAUSADO"
-        sub = f"PONTUACAO: {self.score}" if self.state == "level_clear" else "Partida congelada"
-        self.text(title, self.font_big, YELLOW, (WIDTH // 2, 299), center=True)
-        self.text(sub, self.font_medium, WHITE, (WIDTH // 2, 363), center=True)
-        self.text("ENTER / BOTAO: CONTINUAR", self.font_small, CYAN,
-                  (WIDTH // 2, 435), center=True)
+        # O jogo fica visível ao fundo; modal é apenas informativo.
+        veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        veil.fill((3, 9, 21, 185))
+        self.screen.blit(veil, (0, 0))
+        self.card((321, 232, 638, 338), (17, 34, 66), (80, 143, 224), 24)
+        title = "FASE CONCLUÍDA!" if self.state == "level_clear" else "JOGO PAUSADO"
+        desc = (f"Você fez {self.score} pontos. Próxima fase pronta!"
+                if self.state == "level_clear" else "Respire, o jogo está congelado.")
+        self.text(title, self.font_title, YELLOW, (640, 302), center=True)
+        self.text(desc, self.font_body, WHITE, (640, 377), center=True)
+        self.button("continue", "▶  CONTINUAR", (399, 434, 277, 66), font=self.font_medium)
+        self.button("ranking", "★  RANKING", (697, 434, 198, 66), "secondary", self.font_medium)
+        self.text("ENTER OU BOTÃO: CONTINUAR   •   TAB: RANKING", self.font_tiny,
+                  MUTED, (640, 532), center=True)
 
     def draw(self):
         t = pygame.time.get_ticks() / 1000
-        self.screen.fill(BG)
-        self.draw_hud(t)
-        self.draw_board(t)
-        self.draw_footer()
+        self.ui_buttons = {}
+        self.draw_background()
         if self.state == "menu":
             self.draw_menu(t)
         elif self.state == "ranking":
             self.draw_ranking()
         elif self.state == "game_over":
             self.draw_game_over()
-        elif self.state in ("paused", "level_clear"):
-            self.draw_pause_or_level()
-        pygame.display.flip()
+        else:
+            self.draw_game(t)
+            if self.state in ("paused", "level_clear"):
+                self.draw_pause_or_level()
+        self.present()
+
+    def handle_click(self, position):
+        # Aceita coordenada física e converte para resolução lógica.
+        point = self.to_logical_pos(position)
+        if point is None:
+            return
+        for key, rect in list(self.ui_buttons.items()):
+            if not rect.collidepoint(point):
+                continue
+            if key == "fullscreen":
+                self.toggle_fullscreen()
+            elif key == "ranking":
+                self.toggle_ranking()
+            elif key in ("start", "continue", "back", "new"):
+                if key == "new":
+                    self.open_menu()
+                else:
+                    self.handle_action()
+            return
 
     def handle_key(self, event):
         directions = {
             pygame.K_UP: "U", pygame.K_w: "U", pygame.K_DOWN: "D", pygame.K_s: "D",
             pygame.K_LEFT: "L", pygame.K_a: "L", pygame.K_RIGHT: "R", pygame.K_d: "R",
         }
-        if event.key == pygame.K_ESCAPE:
+        if event.key == pygame.K_F11:
+            self.toggle_fullscreen()
+        elif event.key == pygame.K_ESCAPE:
             if self.state == "ranking":
                 self.handle_action()
-            else:
+            elif self.state == "running":
+                self.state = "paused"
+            elif self.state == "paused":
+                self.state = "running"
+            elif self.state == "game_over":
+                self.open_menu()
+            elif self.state == "menu":
                 self.running = False
         elif event.key == pygame.K_F6 and self.state in ("running", "paused"):
-            # Permite testar o salvamento sem esperar perder as tres vidas.
             self.lives = 0
             self.link.send_lives(0, force=True)
             self.finish_game()
@@ -867,13 +1049,12 @@ class PacmanGame:
                     self.turn_buffer_age = JOY_TURN_BUFFER + 1
                     print(f"Joystick calibrado: X={joystick.center_x}, Y={joystick.center_y}")
                 else:
-                    print("Calibracao indisponivel: aguarde leituras do joystick.")
+                    print("Calibração indisponível: aguarde leituras do joystick.")
         elif event.key in (pygame.K_F7, pygame.K_F8):
             joystick = getattr(self.link, "joystick", None)
             if joystick is not None:
                 joystick.change_sensitivity(-20 if event.key == pygame.K_F7 else 20)
-                print(f"Joystick: sensibilidade {'aumentada' if event.key == pygame.K_F7 else 'reduzida'} "
-                      f"(limiar: {joystick.threshold}; menor = mais sensivel).")
+                print(f"Joystick: limiar {joystick.threshold}")
         elif event.key == pygame.K_TAB:
             self.toggle_ranking()
         elif self.state == "menu":
@@ -901,6 +1082,8 @@ class PacmanGame:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self.running = False
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        self.handle_click(event.pos)
                     elif event.type == pygame.TEXTINPUT:
                         self.input_name(event.text)
                     elif event.type == pygame.KEYDOWN:
@@ -911,7 +1094,6 @@ class PacmanGame:
             self.link.close()
             pygame.quit()
 
-
 def main():
     parser = argparse.ArgumentParser(description="PAC-MAN DELUXE com joystick Arduino e ranking")
     parser.add_argument("--port", help="Porta USB (ex.: COM3)")
@@ -919,6 +1101,7 @@ def main():
     parser.add_argument("--scores", "--db", type=Path, default=SCORE_FILE,
                         help="Arquivo SQLite (padrao: ranking.db na pasta do jogo)")
     parser.add_argument("--no-audio", action="store_true", help="Desabilita efeitos sonoros")
+    parser.add_argument("--windowed", action="store_true", help="Inicia em janela em vez de tela cheia")
     args = parser.parse_args()
     if args.list_ports:
         if list_ports is None:
@@ -927,7 +1110,10 @@ def main():
             for port in ArduinoLink.available_ports():
                 print(f"{port.device} | {port.description}")
         return
-    PacmanGame(ArduinoLink(args.port), rankings_path=args.scores, no_audio=args.no_audio).run()
+    game = PacmanGame(ArduinoLink(args.port), rankings_path=args.scores, no_audio=args.no_audio)
+    if args.windowed:
+        game.configure_display(fullscreen=False)
+    game.run()
 
 
 if __name__ == "__main__":
